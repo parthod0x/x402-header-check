@@ -13,7 +13,7 @@ against each client's limit, and shows which part of the challenge is large.
 The limits are measured, not taken from documentation, by serving a 402 of
 known size to each client and bisecting for the largest it accepts
 (aiohttp 3.14.3, Node 24.13 fetch/undici and node:http, httpx 0.28.1 with
-h11 0.16.0, CPython 3.14 http.client). Each rule below is the one that held
+h11 0.16.0, CPython 3.14 http.client). Redirects are reported, not followed. Each rule below is the one that held
 when the rest of the head was varied. Go's net/http is the documented
 default, not a measurement.
 
@@ -46,8 +46,9 @@ Header = Tuple[bytes, bytes]
 
 
 def _aiohttp(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:
-    worst = max([len(status)] + [max(len(n), len(v)) for n, v in headers])
-    return worst, 8190, "each header value (and name, and the status line) <= 8,190 B"
+    # Names (8,180 B) and the reason phrase (8,190 B) have their own limits,
+    # measured too; an x402 head never comes near them, so only values count.
+    return max([0] + [len(v) for _, v in headers]), 8190, "each header value <= 8,190 B"
 
 
 def _undici(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:
@@ -62,7 +63,10 @@ def _node_http(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:
 
 def _http_client(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:
     worst = max([len(status)] + [len(n) + 2 + len(v) for n, v in headers])
-    return worst, 65534, "each line <= 65,534 B (and at most 100 headers)"
+    if len(headers) > 99:
+        # The count is its own limit, so it is what gets reported.
+        return len(headers), 99, "at most 99 header fields (each line <= 65,534 B); counted: header fields"
+    return worst, 65534, "each line <= 65,534 B, at most 99 header fields"
 
 
 def _go(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:
@@ -203,7 +207,10 @@ def check(url: str, method: str = "auto", body: bytes = b"{}", error_branch: boo
         result["reason"] = "%s: %s" % (type(exc).__name__, exc)
         return result
     if result["status"] != 402:
-        result["reason"] = "answered %s, not 402, to %s" % (result["status"], "/".join(methods))
+        location = next((v for n, v in headers if n.lower() == b"location"), None)
+        result["reason"] = "answered %s, not 402, to %s%s" % (
+            result["status"], "/".join(methods),
+            "; it redirects to %s - check that URL instead" % location.decode("latin-1") if location else "")
         return result
     result["branches"] = []
     for label, b_status, b_headers in branches:

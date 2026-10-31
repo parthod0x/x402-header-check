@@ -200,3 +200,29 @@ def test_a_value_that_is_not_base64_json_is_said_so():
     server = Server(lambda m, h: head(b"not-base64!"))
     ch = xc.check(server.url, "GET")["branches"][0]["challenge"]
     assert ch["decodes"] is False
+
+
+def _urllib_reads(url):
+    import urllib.request
+    try:
+        urllib.request.urlopen(url, timeout=5)
+    except urllib.error.HTTPError as e:
+        return e.code == 402
+    except Exception:
+        return False
+    return False
+
+
+@pytest.mark.parametrize("n_headers,line", [(99, 100), (100, 100), (4, 65534 - 18), (4, 65535 - 18)])
+def test_the_http_client_rule_matches_http_client_itself(n_headers, line):
+    """Line length and header count, both at their measured boundaries, against the stdlib."""
+    pad = [b"x-h%d: 1" % i for i in range(n_headers - 4)]
+    server = Server(lambda m, h: head(b"A" * line, pad))
+    rule = {c["client"]: c for c in xc.check(server.url, "GET")["branches"][0]["clients"]}["requests / urllib (Python)"]
+    assert _urllib_reads(server.url) is rule["ok"], (n_headers, line, rule)
+
+
+def test_a_redirect_is_reported_with_its_target():
+    server = Server(lambda m, h: head(None, [b"location: https://seller.example/v2/paid"], b"HTTP/1.1 301 Moved Permanently"))
+    result = xc.check(server.url)
+    assert result["measured"] is False and "redirects to https://seller.example/v2/paid" in result["reason"]

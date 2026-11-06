@@ -16,7 +16,7 @@ python x402_header_check.py https://api.satledger.org/x402/receipt
 https://api.satledger.org/x402/receipt
   challenge (GET 402): head 4,592 B, 14 headers
     PAYMENT-REQUIRED value: 4,160 B
-    ok    aiohttp (Python)               4,160 / 8,190      each header value <= 8,190 B
+    ok    aiohttp (Python)               4,178 / 8,190      each header line (name + ': ' + value) <= 8,190 B
     ok    fetch / undici (Node)          4,503 / 16,383     sum of name + value over all headers <= 16,383 B
     ok    node:http                      4,519 / 16,383     status reason phrase + sum of name + value <= 16,383 B
     ok    requests / urllib (Python)     4,178 / 65,534     each line <= 65,534 B, at most 99 header fields
@@ -54,16 +54,21 @@ phrase.
 
 | Client | Version measured | Rule |
 | --- | --- | --- |
-| aiohttp | 3.14.3 | each header value ≤ 8,190 B (names ≤ 8,180 B and the reason phrase ≤ 8,190 B, also measured; an x402 head never nears them) |
+| aiohttp | 3.13.5, 3.14.3, 3.14.5 | each header line, name + `: ` + value, ≤ 8,190 B: 8,172 B of `PAYMENT-REQUIRED` value. That is the pure-Python parser, in every position. The compiled parser counts name + value for the first header and the value alone for later ones ([aiohttp#14295](https://github.com/aio-libs/aiohttp/issues/14295)), so it is never stricter; a seller cannot know which a buyer runs. The reason phrase has its own 8,190 B limit. |
 | fetch / undici | Node 24.13 | sum of name + value over all headers ≤ 16,383 B |
 | node:http | Node 24.13 | status reason phrase + sum of name + value ≤ 16,383 B |
 | requests, urllib (`http.client`) | CPython 3.14 | each line ≤ 65,534 B, at most 99 header fields |
 | httpx (h11) | httpx 0.28.1, h11 0.16.0 | no fixed limit when the head arrives in one piece (measured past 80,000 B); its 16,384 B buffer applies only while a head is still arriving |
 | Go net/http | — | 10 MiB, the documented default; not measured |
 
-The tests serve heads either side of each boundary to the real aiohttp,
-Node and `http.client` clients (the first two when installed), so a client release that changes its
-limit fails the suite instead of silently making this tool wrong.
+The tests serve heads either side of each boundary to the real aiohttp
+(both parsers, the header first and last), Node and `http.client` clients
+(the first two when installed), so a client release that changes its limit
+fails the suite instead of silently making this tool wrong.
+
+0.1.0 counted the aiohttp value alone, which is the compiled parser for any
+header but the first. It passed a `PAYMENT-REQUIRED` value of 8,173 to
+8,190 B that the pure-Python parser refuses.
 
 HTTP/2 is not measured. There the limit is `SETTINGS_MAX_HEADER_LIST_SIZE`,
 which some servers and clients ignore and others enforce.

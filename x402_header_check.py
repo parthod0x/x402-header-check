@@ -12,7 +12,7 @@ against each client's limit, and shows which part of the challenge is large.
 
 The limits are measured, not taken from documentation, by serving a 402 of
 known size to each client and bisecting for the largest it accepts
-(aiohttp 3.14.3, Node 24.13 fetch/undici and node:http, httpx 0.28.1 with
+(aiohttp 3.13.5-3.14.5 with both of its parsers, Node 24.13 fetch/undici and node:http, httpx 0.28.1 with
 h11 0.16.0, CPython 3.14 http.client). Redirects are reported, not followed. Each rule below is the one that held
 when the rest of the head was varied. Go's net/http is the documented
 default, not a measurement.
@@ -33,7 +33,7 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 USER_AGENT = "x402-header-check/%s" % __version__
 MAX_HEAD = 1 << 20          # read at most 1 MiB of response head
 CRLF = b"\r\n"
@@ -46,9 +46,16 @@ Header = Tuple[bytes, bytes]
 
 
 def _aiohttp(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:
-    # Names (8,180 B) and the reason phrase (8,190 B) have their own limits,
-    # measured too; an x402 head never comes near them, so only values count.
-    return max([0] + [len(v) for _, v in headers]), 8190, "each header value <= 8,190 B"
+    # aiohttp has two parsers and they count differently. The pure-Python one
+    # (installed without its C extension, or AIOHTTP_NO_EXTENSIONS=1) holds
+    # name + ": " + value to 8,190 B in every position. The compiled one holds
+    # name + value for the first header and the value alone for every later
+    # one (aiohttp#14295), so it is never stricter. A seller cannot know which
+    # a buyer runs, so the line, name included, is the rule: 8,172 B of value
+    # for PAYMENT-REQUIRED. The reason phrase has its own 8,190 B limit; an
+    # x402 head never nears it.
+    return max([0] + [len(n) + 2 + len(v) for n, v in headers]), 8190, \
+        "each header line (name + ': ' + value) <= 8,190 B"
 
 
 def _undici(status: bytes, headers: List[Header]) -> Tuple[int, int, str]:

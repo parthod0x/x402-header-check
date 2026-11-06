@@ -48,10 +48,10 @@ class Server:
                 conn.close()
 
 
-def head(value=b"", extra=(), status=b"HTTP/1.1 402 Payment Required"):
+def head(value=b"", extra=(), status=b"HTTP/1.1 402 Payment Required", first=False):
     fields = [b"content-type: application/json", b"content-length: 2", b"connection: close"] + list(extra)
     if value is not None:
-        fields.append(b"payment-required: " + value)
+        fields.insert(0 if first else len(fields), b"payment-required: " + value)
     return status + CRLF + CRLF.join(fields) + CRLF + CRLF
 
 
@@ -71,9 +71,11 @@ def verdicts(value):
 
 # ---- each client's rule, at its measured boundary --------------------------------------------
 
-def test_aiohttp_refuses_one_byte_past_8190_in_a_single_value():
-    assert verdicts(b"A" * 8190)["aiohttp (Python)"]["ok"] is True
-    assert verdicts(b"A" * 8191)["aiohttp (Python)"]["ok"] is False
+def test_aiohttp_counts_the_line_name_included():
+    # "payment-required: " is 18 B, so the value has 8,172 B
+    assert verdicts(b"A" * 8172)["aiohttp (Python)"]["ok"] is True
+    assert verdicts(b"A" * 8173)["aiohttp (Python)"]["ok"] is False
+    assert verdicts(b"A" * 8190)["aiohttp (Python)"]["ok"] is False, "the 0.1.0 rule passed this"
 
 
 def test_undici_counts_name_plus_value_across_every_header():
@@ -98,25 +100,45 @@ def test_a_value_every_client_reads_is_ok_and_exits_zero(capsys):
 
 # ---- the rules agree with the real clients, where they are installed ------------------------
 
-def _aiohttp_reads(url):
-    aiohttp = pytest.importorskip("aiohttp")
+_AIOHTTP_GET = """
+import asyncio, sys, aiohttp
+async def go():
+    async with aiohttp.ClientSession() as s:
+        async with s.get(sys.argv[1]) as r:
+            return r.status == 402
+try:
+    print(asyncio.run(go()))
+except Exception:
+    print(False)
+"""
 
-    async def go():
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url) as r:
-                return r.status == 402
-    try:
-        return asyncio.run(go())
-    except Exception:
-        return False
+
+def _aiohttp_reads(url, pure):
+    """Whether aiohttp reads the 402, with its compiled parser or its pure-Python one."""
+    pytest.importorskip("aiohttp")
+    import os
+    env = dict(os.environ)
+    env.pop("AIOHTTP_NO_EXTENSIONS", None)
+    if pure:
+        env["AIOHTTP_NO_EXTENSIONS"] = "1"
+    out = subprocess.run([sys.executable, "-c", _AIOHTTP_GET, url], capture_output=True, text=True,
+                         env=env, timeout=60).stdout.strip()
+    return out == "True"
 
 
 @pytest.mark.parametrize("extra", [(), (b"x-pad: " + b"P" * 1000,)])
-def test_the_aiohttp_rule_matches_aiohttp_itself(extra):
-    for n in (8190, 8191):
-        server = Server(lambda m, h, n=n: head(b"A" * n, extra))
-        rule = {c["client"]: c for c in xc.check(server.url, "GET")["branches"][0]["clients"]}["aiohttp (Python)"]["ok"]
-        assert _aiohttp_reads(server.url) is rule, n
+def test_the_aiohttp_rule_is_what_every_aiohttp_buyer_reads(extra):
+    """Both parsers, the header first and last: the rule passes a head only if every one reads it."""
+    for n in (8172, 8173, 8190, 8191):
+        readers = []
+        for first in (False, True):
+            server = Server(lambda m, h, n=n, first=first: head(b"A" * n, extra, first=first))
+            rule = {c["client"]: c for c in xc.check(server.url, "GET")["branches"][0]["clients"]}["aiohttp (Python)"]["ok"]
+            readers += [_aiohttp_reads(server.url, pure) for pure in (False, True)]
+        assert all(readers) is rule, (n, readers)
+    server = Server(lambda m, h: head(b"A" * 8190))
+    assert _aiohttp_reads(server.url, pure=False) is True, \
+        "the compiled parser reads a later 8,190 B value; the rule is stricter on purpose"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
